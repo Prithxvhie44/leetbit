@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from app.ai.generator import DisabledAIContentGenerator, OpenAIResponsesGenerator
+from app.auth.github import GitHubOAuthDeviceFlow
 from app.config import Settings, get_settings
 from app.database.db import SQLiteSubmissionStore
+from app.database.models import ConnectedAccountRecord
 from app.github.git import GitRepositoryManager, build_github_remote_url
 from app.github.publisher import GitHubPublisherService
 from app.leetcode.detector import LeetCodeDetector
@@ -32,19 +37,53 @@ class AppRuntime:
         self.store.close()
 
 
+class LeetCodeConnectRequest(BaseModel):
+    username: str = Field(min_length=1)
+    session_cookie: str = Field(min_length=1)
+
+
+class GitHubDeviceStartRequest(BaseModel):
+    client_id: str | None = None
+    scope: str | None = None
+
+
+class GitHubDeviceCompleteRequest(BaseModel):
+    client_id: str | None = None
+    device_code: str = Field(min_length=1)
+    expires_in: int = Field(gt=0)
+    interval: int = Field(gt=0)
+
+
+def _account_value(store: SQLiteSubmissionStore, provider: str, key: str) -> str | None:
+    account = store.get_account(provider)
+    if account is None:
+        return None
+    value = account.data.get(key)
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
 def build_runtime(settings: Settings) -> AppRuntime:
     configure_logging(settings.log_level)
 
     store = SQLiteSubmissionStore(settings.database_url)
 
-    leetcode_client: LeetCodeGraphQLClient | None = None
-    detector = LeetCodeDetector(None)
-    if settings.leetcode_username:
-        leetcode_client = LeetCodeGraphQLClient(
-            username=settings.leetcode_username,
-            session_cookie=settings.leetcode_session,
-        )
-        detector = LeetCodeDetector(leetcode_client)
+    def resolve_leetcode_username() -> str | None:
+        return _account_value(store, "leetcode", "username") or settings.leetcode_username
+
+    def resolve_leetcode_session() -> str | None:
+        return _account_value(store, "leetcode", "session_cookie") or settings.leetcode_session
+
+    def resolve_github_remote_url() -> str | None:
+        token = _account_value(store, "github", "access_token") or settings.github_token
+        return build_github_remote_url(settings.github_repo, token)
+
+    leetcode_client = LeetCodeGraphQLClient(
+        username_provider=resolve_leetcode_username,
+        session_cookie_provider=resolve_leetcode_session,
+    )
+    detector = LeetCodeDetector(leetcode_client)
 
     ai_generator = DisabledAIContentGenerator()
     if settings.openai_api_key:
@@ -53,7 +92,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
     repository_manager = GitRepositoryManager(
         settings.github_base_path,
         settings.github_base_branch,
-        build_github_remote_url(settings.github_repo, settings.github_token),
+        remote_url_provider=resolve_github_remote_url,
     )
     github_publisher = GitHubPublisherService(repository_manager)
 
@@ -82,6 +121,13 @@ settings = get_settings()
 runtime = build_runtime(settings)
 app = FastAPI(title="Leetbit", version="0.1.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.on_event("startup")
 def startup() -> None:
@@ -96,6 +142,88 @@ def shutdown() -> None:
 @app.get("/healthz")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/auth/status")
+def auth_status() -> dict[str, Any]:
+    accounts = {
+        account.provider: account.as_json()
+        for account in runtime.store.list_accounts()
+    }
+    return {
+        "accounts": accounts,
+        "env": {
+            "github_token": bool(runtime.settings.github_token),
+            "leetcode_session": bool(runtime.settings.leetcode_session),
+        },
+        "github_oauth_configured": bool(runtime.settings.github_oauth_client_id),
+    }
+
+
+@app.post("/auth/leetcode/connect")
+def connect_leetcode(payload: LeetCodeConnectRequest) -> dict[str, str]:
+    runtime.store.upsert_account(
+        ConnectedAccountRecord(
+            provider="leetcode",
+            data={
+                "username": payload.username.strip(),
+                "session_cookie": payload.session_cookie.strip(),
+                "source": "extension",
+            },
+        )
+    )
+    return {"status": "connected", "provider": "leetcode"}
+
+
+@app.delete("/auth/leetcode/connect")
+def disconnect_leetcode() -> dict[str, str]:
+    runtime.store.delete_account("leetcode")
+    return {"status": "disconnected", "provider": "leetcode"}
+
+
+@app.post("/auth/github/device/start")
+def start_github_device_flow(payload: GitHubDeviceStartRequest) -> dict[str, Any]:
+    client_id = (payload.client_id or runtime.settings.github_oauth_client_id or "").strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="GITHUB_OAUTH_CLIENT_ID is required for GitHub OAuth")
+
+    scope = (payload.scope or runtime.settings.github_oauth_scope or "repo").strip()
+    device_flow = GitHubOAuthDeviceFlow(client_id=client_id, scope=scope)
+    result = device_flow.start()
+    device_flow.close()
+    return asdict(result)
+
+
+@app.post("/auth/github/device/complete")
+def complete_github_device_flow(payload: GitHubDeviceCompleteRequest) -> dict[str, str]:
+    client_id = (payload.client_id or runtime.settings.github_oauth_client_id or "").strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="GITHUB_OAUTH_CLIENT_ID is required for GitHub OAuth")
+
+    scope = runtime.settings.github_oauth_scope
+    device_flow = GitHubOAuthDeviceFlow(client_id=client_id, scope=scope)
+    try:
+        access_token = device_flow.complete(payload.device_code, payload.expires_in, payload.interval)
+    finally:
+        device_flow.close()
+
+    runtime.store.upsert_account(
+        ConnectedAccountRecord(
+            provider="github",
+            data={
+                "access_token": access_token,
+                "scope": scope,
+                "source": "device_flow",
+            },
+        )
+    )
+    return {"status": "connected", "provider": "github"}
+
+
+@app.delete("/auth/github/connect")
+def disconnect_github() -> dict[str, str]:
+    runtime.store.delete_account("github")
+    return {"status": "disconnected", "provider": "github"}
 
 
 @app.post("/workflow/run")

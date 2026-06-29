@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -23,6 +24,12 @@ class GitRepositoryManager:
     repository_path: Path
     branch: str = "main"
     remote_url: str | None = None
+    remote_url_provider: Callable[[], str | None] | None = None
+
+    def _resolve_remote_url(self) -> str | None:
+        if self.remote_url_provider is None:
+            return self.remote_url
+        return self.remote_url_provider()
 
     def ensure_repository(self) -> None:
         self.repository_path.mkdir(parents=True, exist_ok=True)
@@ -35,11 +42,12 @@ class GitRepositoryManager:
         git_dir = self.repository_path / ".git"
         repo = Repo.init(self.repository_path) if not git_dir.exists() else Repo(self.repository_path)
 
-        if self.remote_url:
+        remote_url = self._resolve_remote_url()
+        if remote_url:
             if "origin" in repo.remotes:
-                repo.remote("origin").set_url(self.remote_url)
+                repo.remote("origin").set_url(remote_url)
             else:
-                repo.create_remote("origin", self.remote_url)
+                repo.create_remote("origin", remote_url)
 
         with repo.config_writer() as config_writer:
             config_writer.set_value("user", "name", "Leetbit")
@@ -60,7 +68,10 @@ class GitRepositoryManager:
         elif repo.head.is_valid():
             commit = repo.head.commit
 
-        if self.remote_url and repo.remotes:
+        remote_url = self._resolve_remote_url()
+        if remote_url and repo.remotes:
+            if "origin" in repo.remotes:
+                repo.remote("origin").set_url(remote_url)
             try:
                 repo.remotes.origin.push(refspec=f"HEAD:refs/heads/{self.branch}")
             except Exception:

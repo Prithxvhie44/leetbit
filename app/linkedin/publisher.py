@@ -31,11 +31,6 @@ def build_linkedin_publisher(config: str | None) -> LinkedInPublisher | None:
 
         return LinkedInAPIPublisher.from_config(parsed)
 
-    if provider in {"playwright", "browser"} or config.lower().startswith("playwright:"):
-        from app.linkedin.playwright import PlaywrightLinkedInPublisher
-
-        return PlaywrightLinkedInPublisher.from_config(parsed)
-
     return DisabledLinkedInPublisher()
 
 
@@ -51,8 +46,6 @@ def _parse_config(config: str) -> dict[str, Any]:
         provider, _, value = stripped.partition(":")
         provider = provider.strip().lower()
         value = value.strip()
-        if provider == "playwright":
-            return {"provider": "playwright", "profile_dir": value}
         if provider == "api":
             return {"provider": "api", "publish_url": value}
 

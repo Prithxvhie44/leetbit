@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     leetcode_session: str | None = Field(default=None)
     github_token: str | None = Field(default=None)
     github_repo: str | None = Field(default=None)
+    github_oauth_client_id: str | None = Field(default=None)
+    github_oauth_scope: str = Field(default="repo")
     github_base_branch: str = Field(default="main")
     github_base_path: Path = Field(default=Path("Leetbit-Revisions"))
     linkedin_config: str | None = Field(default=None)

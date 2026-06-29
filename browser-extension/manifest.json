@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Leetbit Helper",
+  "version": "0.1.0",
+  "description": "Capture LeetCode session cookies and send them to a local Leetbit backend.",
+  "permissions": ["cookies", "storage", "tabs"],
+  "host_permissions": ["<all_urls>", "https://leetcode.com/*"],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

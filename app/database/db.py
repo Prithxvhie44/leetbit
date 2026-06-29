@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.database.models import ProcessedSubmissionRecord
+from app.database.models import ConnectedAccountRecord, ProcessedSubmissionRecord
 
 
 class SQLiteSubmissionStore:
@@ -33,6 +34,15 @@ class SQLiteSubmissionStore:
                 linkedin_status TEXT NOT NULL,
                 linkedin_error TEXT,
                 github_error TEXT
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS connected_accounts (
+                provider TEXT PRIMARY KEY,
+                account_data TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
             """
         )
@@ -93,6 +103,53 @@ class SQLiteSubmissionStore:
             ),
         )
         self._connection.commit()
+
+    def upsert_account(self, record: ConnectedAccountRecord) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO connected_accounts (provider, account_data, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(provider) DO UPDATE SET
+                account_data = excluded.account_data,
+                updated_at = excluded.updated_at
+            """,
+            (
+                record.provider,
+                json.dumps(record.data),
+                record.updated_at.astimezone(timezone.utc).isoformat(),
+            ),
+        )
+        self._connection.commit()
+
+    def get_account(self, provider: str) -> ConnectedAccountRecord | None:
+        row = self._connection.execute(
+            "SELECT provider, account_data, updated_at FROM connected_accounts WHERE provider = ?",
+            (provider,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ConnectedAccountRecord(
+            provider=row["provider"],
+            data=json.loads(row["account_data"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def delete_account(self, provider: str) -> None:
+        self._connection.execute("DELETE FROM connected_accounts WHERE provider = ?", (provider,))
+        self._connection.commit()
+
+    def list_accounts(self) -> list[ConnectedAccountRecord]:
+        rows = self._connection.execute(
+            "SELECT provider, account_data, updated_at FROM connected_accounts ORDER BY provider"
+        ).fetchall()
+        return [
+            ConnectedAccountRecord(
+                provider=row["provider"],
+                data=json.loads(row["account_data"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+            for row in rows
+        ]
 
     def latest(self) -> ProcessedSubmissionRecord | None:
         row = self._connection.execute(

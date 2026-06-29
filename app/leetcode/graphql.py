@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Mapping
 from typing import Any
 
@@ -11,16 +12,23 @@ class LeetCodeGraphQLClient:
 
     def __init__(
         self,
-        username: str,
+        username: str | None = None,
         session_cookie: str | None = None,
+        username_provider: Callable[[], str | None] | None = None,
+        session_cookie_provider: Callable[[], str | None] | None = None,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.username = username
         self.session_cookie = session_cookie
+        self.username_provider = username_provider
+        self.session_cookie_provider = session_cookie_provider
         self._client = httpx.Client(timeout=timeout, transport=transport)
 
     def fetch_recent_accepted_submission(self) -> Mapping[str, Any] | None:
+        username = self._resolve_username()
+        if not username:
+            return None
         payload = {
             "query": """
                 query recentAcceptedSubmission($username: String!) {
@@ -36,7 +44,7 @@ class LeetCodeGraphQLClient:
                   }
                 }
             """,
-            "variables": {"username": self.username},
+            "variables": {"username": username},
         }
         data = self._post(payload)
         submissions = data.get("recentAcSubmissionList") or []
@@ -92,9 +100,28 @@ class LeetCodeGraphQLClient:
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "User-Agent": "Leetbit/0.1"}
-        if self.session_cookie:
-            headers["Cookie"] = f"LEETCODE_SESSION={self.session_cookie}"
+        session_cookie = self._resolve_session_cookie()
+        if session_cookie:
+            headers["Cookie"] = f"LEETCODE_SESSION={session_cookie}"
         return headers
+
+    def _resolve_username(self) -> str | None:
+        if self.username_provider is not None:
+            username = self.username_provider()
+            if username:
+                return username.strip()
+        if self.username:
+            return self.username.strip()
+        return None
+
+    def _resolve_session_cookie(self) -> str | None:
+        if self.session_cookie_provider is not None:
+            session_cookie = self.session_cookie_provider()
+            if session_cookie:
+                return session_cookie.strip()
+        if self.session_cookie:
+            return self.session_cookie.strip()
+        return None
 
     def close(self) -> None:
         self._client.close()
